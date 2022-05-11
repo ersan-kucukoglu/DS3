@@ -1,0 +1,392 @@
+---
+title: "DS3"
+author: "Ersan Kucukoglu"
+date: '2022-05-04'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(lubridate) 
+library(tidytext)
+library(tm)
+library(wordcloud)
+library(stringr)
+library(ggplot2)
+library(ggeasy)
+library(plotly)
+library(dplyr)
+library(magrittr)
+library(readr)
+library(stringr)
+library(data.table)
+library(psych)
+library(forcats)
+library(wordcloud2)
+library(tidyr)
+library(igraph)
+library(ggraph)
+library(networkD3)
+```
+
+## Scrape Tweets
+
+```{r,include=FALSE}
+#PYTHON
+#import snscrape.modules.twitter as sntwitter
+
+#query = "(cingen OR çingeneler OR çingene OR #çingene OR çingen OR #RomanlarGünü OR #romanlargunu OR sopar OR şopar ) lang:tr until:2022-04-22 since:2021-04-01 -filter:links"
+
+#tweets = []
+
+#for tweet in sntwitter.TwitterSearchScraper(query).get_items():
+#        tweets.append([tweet.date,tweet.user.username,tweet.content,tweet.hashtags])
+
+#df = pd.DataFrame(tweets, columns= ['datetime','user','tweet','hashtag'])
+#df.to_csv('data/tr_tweets.csv')
+```
+
+```{r,include=FALSE}
+## READ THE DATA
+tweetsDf = fread("https://raw.githubusercontent.com/ersan-kucukoglu/DS3/main/data/tr_tweets.csv")
+```
+
+## DATA PREPROCESSING
+
+```{r ,include=FALSE}
+df <- data.frame(tweetsDf) #copy the dataframe
+
+dim(df) #shape of the df
+
+df <- df %>%       # select text and created time variables
+  select(datetime, tweet) %>% 
+  rename(text = tweet)
+
+is.null(df$text)  # check the null values of the text variable
+#df$tweet <- na.omit(df$tweet) # Method 1 - Remove NA
+
+regex <- "(^|[^@\\w])@(\\w{1,15})\\b"
+df$text <- gsub(regex, "", df$text) #remove username from the text
+df$text <- tolower(df$text) #lowercase
+df$text <- gsub("http.*","", df$text) # Remove http
+df$text <- gsub("https.*","", df$text) # Remove https
+df$text <- str_replace(df$text,"cingene", "çingene")
+df$text <- str_replace(df$text,"cingen", "çingen")
+df$text <- str_replace(df$text,"çingeneler", "çingene")
+df$text <- str_replace(df$text,"çingenler", "çingene")
+df$text <- str_replace(df$text,"sopar", "şopar")
+df$text <- gsub("RT","", df$text)  # remove RT
+df$text <- gsub("rt","", df$text)  # remove rt
+df$text <- gsub("[[:punct:]]","", df$text) # remove punctuation
+df$text <- gsub("^ ","",df$text)   # remove blank spaces at the beginning
+df$text <- enc2native(df$text) # Covnert emojis to native encoding
+df$text <- gsub("<.*.>", "", df$text)  # remove tabs
+df$text <- gsub("@\\w+", "", df$text) #remove at
+df$text <- gsub("http\\w+", "", df$text) #remove links
+df$text <- trimws(df$text) # Remove leading whitespaces from the beginning
+df <- df %>% filter(nchar(text)!=0) # remove blank rows
+df$text  <- gsub('[[:digit:]]+', '', df$text) # remove numbers
+df <-  df[!duplicated(df$text), ] # remove duplicates
+
+keywords <- c("cingen","cingene","cingeneler","çingene","çingen","çingeneler","roman","sopar","şopar")
+
+word_matc <- str_c(keywords, collapse = "|")
+word_matc
+
+has_word <- str_subset(df$text, word_matc)
+has_word
+
+text_df <- data.frame(text = has_word)
+
+df <- text_df %>%
+  left_join(df, by='text')
+```
+
+
+*CREATE TOKENS AND REMOVE STOPWORDS*
+```{r, include=FALSE}
+tokens <- df %>%
+  unnest_tokens(word, text)
+
+
+stop_words <- data.table(word = stopwords::stopwords("tr", source = "stopwords-iso"))
+stop_words <- stop_words[stop_words$word != "gibi"]
+ekstra_sw <- c("bi","mi","e","d","de","a","kü","aık","falan","isen","derler","cok","bak","tane","lan","deyin","abi","demek","bugün","hala","diyor","dedi","be","var","icin","ye","diyo","la","bide","der","ol","den","dan")
+stop_words <- data.table(word = append(stop_words$word,ekstra_sw))
+
+
+tokens <- tokens %>% 
+  anti_join(stop_words, by = 'word')
+```
+
+
+```{r}
+p1 <- tokens %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 500) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word,fill=n)) +
+  geom_col(fill = "steelblue") +
+  xlab("Frequency")+
+  theme_classic()+
+  geom_text(aes(label=n), position=position_dodge(width=0.9), hjust=-0.07,vjust=-0.25)+
+  labs(y = NULL)+
+  ggtitle("The most common words")+
+  theme(legend.position="none")
+p1
+```
+
+*WORDCLOUD*
+```{r}
+word_counts <- tokens %>% 
+  count(word,sort = TRUE) %>% 
+  filter(n>150) 
+
+word_counts$n <- ifelse(word_counts$word == "çingene", 0, word_counts$n)
+word_counts$n <- ifelse(word_counts$word == "çingen", 0, word_counts$n)
+
+set.seed(12345)
+wordcloud <- wordcloud2(data=word_counts, size=1.6, color='random-dark')
+wordcloud
+```
+
+## SENTIMENT ANALAYSIS
+
+```{r}
+
+lexicon <- fread("https://raw.githubusercontent.com/ersan-kucukoglu/DS3/main/data/SWNetTR.csv")
+
+
+lexicon2 <- lexicon %>% 
+  select(c("WORD","POLARITY")) %>% 
+  rename('word'="WORD",'value'="POLARITY")
+
+lexicon2$value <- ifelse(lexicon2$word == "çingene", -1, lexicon2$value)
+lexicon2$value <- ifelse(lexicon2$word == "çingen", -1, lexicon2$value)
+lexicon2$value <- ifelse(lexicon2$word == "gibi", 0, lexicon2$value)
+lexicon2$value <- ifelse(lexicon2$word == "konuşma", -1, lexicon2$value)
+
+lexicon_extraWords <- data.frame(word = c("amk","aq","şopar","çingene laneti","çingene sarisi"),  # Create example data
+                   value = c(-1,-1,-1,-1,-1))
+lexicon3 <- bind_rows(lexicon2, lexicon_extraWords)
+
+```
+
+```{r}
+df_sentiments <- df %>%
+  mutate(linenumber = row_number()) %>% #line number for later sentence grouping 
+  unnest_tokens(word, text) %>% #tokenization - sentence to words
+  anti_join(stop_words, by = 'word') %>% 
+  inner_join(lexicon3) %>% # inner join with our lexicon to get the polarity score
+  group_by(linenumber) %>% #group by for sentence polarity
+  summarise(score = sum(value)) %>% # final sentence polarity from words
+  left_join( df %>%
+               mutate(linenumber = row_number())) #get the actual text next to the sentiment value
+
+
+head(df_sentiments)
+```
+
+```{r}
+summary(df_sentiments$score)
+
+table(df_sentiments$score)
+
+```
+
+```{r}
+df_sentiments <- df_sentiments %>% 
+  mutate(sentiment = ifelse(df_sentiments$score == 0, 'Neutral',
+                            ifelse((df_sentiments$score < 0 & df_sentiments$score >= -5), 'Negative',
+                                   ifelse((df_sentiments$score < -5 & df_sentiments$score > -20) , 'Very-Negative',
+                                          ifelse((df_sentiments$score >0 & df_sentiments$score <5), 'Positive','Very-Positive'))))
+  )
+
+df_sentiments %>% select(text,score,sentiment) %>% head()
+```
+
+```{r}
+write.csv(df_sentiments,"~/Desktop/BA-Courses/DS3/final_project/data/sentiment_output.csv", row.names = FALSE)
+```
+
+```{r, warning=FALSE}
+p2 <- df_sentiments %>%
+  ggplot(aes(x=score)) + 
+  geom_histogram(binwidth = 1, fill = "lightblue")+ 
+  ylab("Frequency") + 
+  xlab("sentiment score") +
+  xlim(-10, 10)+
+  ggtitle("Distribution of Sentiment scores of the tweets") +
+  theme_classic()
+p2
+```
+
+```{r}
+df_sentiments$sentiment <- factor(df_sentiments$sentiment,    # Change ordering manually
+                  levels = c("Very-Negative","Negative", "Neutral","Positive","Very-Positive"))
+
+df_senti_chart <- df_sentiments %>% 
+  group_by(sentiment) %>% # Variable to be transformed
+  count() %>% 
+  ungroup() %>% 
+  mutate(perc = `n` / sum(`n`)) %>% 
+  arrange(perc) %>%
+  mutate(labels = scales::percent(perc))
+
+p3 <- df_senti_chart %>% 
+  ggplot(aes(sentiment,perc*100,fill=sentiment))+
+  geom_col()+
+  labs(x = "Sentiment", y = "Percentage %", title="The Distribution of the Tweet's Sentiments (%)")+
+  geom_text(aes(label=labels), position=position_dodge(width=0.9), hjust=-0.07, vjust=0.9, size=3)+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())+
+  theme_classic()+
+  coord_flip()+
+  theme(legend.position="none")+
+  scale_fill_brewer(palette="RdYlGn")
+p3
+```
+
+## BIGRAMS
+
+```{r}
+
+df_biagrams <- df %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+# df_biagrams %>%
+#   count(bigram, sort = TRUE)
+
+bigrams_separated <- df_biagrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+bigrams_filtered <- bigrams_separated %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+
+# new bigram counts:
+bigram_counts <- bigrams_filtered %>% 
+  count(word1, word2, sort = TRUE)
+
+bigrams_united <- bigrams_filtered %>%
+  unite(bigram, word1, word2, sep = " ")
+```
+
+```{r}
+p4 <- bigrams_united %>%
+  count(bigram, sort = TRUE) %>%
+  filter(n > 175) %>%
+  mutate(word = reorder(bigram, n)) %>%
+  ggplot(aes(n, word,fill=n)) +
+  geom_col(fill = "steelblue") +
+  xlab("Frequency")+
+  theme_classic()+
+  geom_text(aes(label=n), position=position_dodge(width=0.9), hjust=-0.07, vjust=-0.025, size=3)+
+  labs(y = NULL)+
+  ggtitle("The most common bigrams")+
+  theme(legend.position="none")
+p4
+```
+```{r}
+# filter for only relatively common combinations
+bigram_graph <- bigram_counts %>%
+  filter(n > 80) %>%
+  graph_from_data_frame()
+
+set.seed(2020)
+
+a <- grid::arrow(type = "closed", length = unit(.05, "inches"))
+
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), show.legend = FALSE,
+                 arrow = a, end_cap = circle(.07, 'inches')) +
+  geom_node_point(color = "lightblue", size = 3) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+```{r}
+
+# For visualization purposes we scale by a global factor. 
+ScaleWeight <- function(x, lambda) {
+  x / lambda
+}
+
+network <-  bigram_counts %>%
+  filter(n > 50) %>%
+  mutate(n = ScaleWeight(x = n, lambda = 2E3)) %>% 
+  graph_from_data_frame(directed = FALSE)
+
+plot(
+  network, 
+  vertex.size = 1,
+  vertex.label.color = 'black', 
+  vertex.label.cex = 0.7, 
+  vertex.label.dist = 1,
+  edge.color = 'gray', 
+  main = 'Bigram Count Network', 
+  #sub = glue('Weight Threshold: {threshold}'), 
+  alpha = 50
+)
+```
+
+
+```{r}
+network <- bigram_counts %>%
+  filter(n > 70) %>%
+  graph_from_data_frame(directed = FALSE)
+
+# Store the degree.
+V(network)$degree <- strength(graph = network)
+# Compute the weight shares.
+E(network)$width <- E(network)$n/max(E(network)$n)
+
+# Create networkD3 object.
+network.D3 <- igraph_to_networkD3(g = network)
+# Define node size.
+network.D3$nodes %<>% mutate(Degree = (1E-2)*V(network)$degree)
+# Define color group
+network.D3$nodes %<>% mutate(Group = 1)
+# Define edges width. 
+network.D3$links$Width <- 10*E(network)$width
+
+
+nw <- forceNetwork(
+  Links = network.D3$links, 
+  Nodes = network.D3$nodes, 
+  Source = 'source', 
+  Target = 'target',
+  NodeID = 'name',
+  Group = 'Group', 
+  opacity = 0.8,
+  Value = 'Width',
+  Nodesize = 'Degree', 
+  # We input a JavaScript function.
+  linkWidth = JS("function(d) { return Math.sqrt(d.value); }"), 
+  fontSize = 12,
+  zoom = TRUE, 
+  opacityNoHover = 1
+)
+nw
+
+# save the widget
+library(htmlwidgets)
+saveWidget(nw, file=( "~/Desktop/BA-Courses/DS3/final_project/figures/networkInteractive2.html"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
